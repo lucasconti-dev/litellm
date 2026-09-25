@@ -10,6 +10,7 @@ import json
 from unittest.mock import patch
 
 import httpx
+import litellm
 import pytest
 
 from litellm.llms.bedrock.common_utils import BedrockModelInfo, get_bedrock_chat_config
@@ -322,6 +323,35 @@ def test_mantle_messages_transform_request_omits_stream_when_not_streaming():
         headers={},
     )
     assert "stream" not in request
+
+
+def test_mantle_messages_forwards_extensions_the_invoke_sanitizer_would_refuse(monkeypatch):
+    from litellm.types.router import GenericLiteLLMParams
+
+    monkeypatch.setattr(litellm, "drop_params", False)
+    monkeypatch.setattr(litellm, "modify_params", False)
+    messages = [
+        {"role": "user", "content": "read /tmp/a.txt"},
+        {
+            "role": "assistant",
+            "output_config": {"effort": "high"},
+            "content": [
+                {"type": "tool_addition", "tool": {"type": "tool_reference", "name": "mcp__files__read"}},
+                {"type": "text", "text": "ok"},
+            ],
+        },
+        {"role": "user", "content": "continue"},
+    ]
+
+    request = AmazonMantleMessagesConfig().transform_anthropic_messages_request(
+        model="mantle/anthropic.claude-mythos-preview",
+        messages=messages,
+        anthropic_messages_optional_request_params={"max_tokens": 100},
+        litellm_params=GenericLiteLLMParams(),
+        headers={},
+    )
+
+    assert request["messages"] == messages
 
 
 def test_mantle_chat_streaming_uses_anthropic_sse_iterator():

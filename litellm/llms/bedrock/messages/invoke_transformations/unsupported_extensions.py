@@ -244,9 +244,9 @@ def raise_refusal(refused: Refused, model: str) -> NoReturn:
     )
     param_error: Final = (
         f"Bedrock Invoke does not accept {', '.join(param_offenders)}. "
-        "Set `litellm_settings.drop_params: true` on the proxy or `litellm.drop_params = True` "
-        "in the SDK to have LiteLLM drop them (an unsupported thinking.display falls back to the "
-        "model default), or remove them from the request."
+        "Set `drop_params: true` in this deployment's `litellm_params` (or `litellm_settings.drop_params: true` "
+        "on the proxy, `litellm.drop_params = True` in the SDK) to have LiteLLM drop them (an unsupported "
+        "thinking.display falls back to the model default), or remove them from the request."
     )
     block_error: Final = (
         f"Bedrock Invoke does not accept {', '.join(block_offenders)}. "

@@ -3440,7 +3440,7 @@ def test_bedrock_invoke_rejects_nested_output_config_without_drop_params(monkeyp
         )
 
     assert "messages[1].output_config" in str(exc_info.value)
-    assert "drop_params" in str(exc_info.value)
+    assert "`drop_params: true` in this deployment's `litellm_params`" in str(exc_info.value)
 
 
 def test_bedrock_invoke_rejects_tool_addition_block_without_modify_params(monkeypatch):

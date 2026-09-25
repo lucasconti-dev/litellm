@@ -73,6 +73,33 @@ def test_transform_to_invoke_model_format_base64_encodes_body():
     assert body["max_tokens"] == DEFAULT_ANTHROPIC_INVOKE_MODEL_MAX_TOKENS
 
 
+def test_transform_to_invoke_model_format_strips_extensions_bedrock_invoke_rejects():
+    config = BedrockCountTokensConfig()
+    tool_addition = {"type": "tool_addition", "tool": {"type": "tool_reference", "name": "mcp__files__read"}}
+    tool_use = {"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {"path": "/tmp/a.txt"}}
+    request = {
+        "model": "us.anthropic.claude-sonnet-5",
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "read /tmp/a.txt"}]},
+            {"role": "assistant", "output_config": {"effort": "high"}, "content": [tool_addition, tool_use]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "hi"}]},
+            {"role": "assistant", "content": [tool_addition]},
+        ],
+    }
+    snapshot = json.loads(json.dumps(request))
+
+    result = config.transform_anthropic_to_bedrock_count_tokens(request)
+
+    body = json.loads(base64.b64decode(result["input"]["invokeModel"]["body"]))
+    assert body["messages"] == [
+        snapshot["messages"][0],
+        {"role": "assistant", "content": [tool_use]},
+        snapshot["messages"][2],
+        {"role": "assistant", "content": [{"type": "text", "text": "Please continue."}]},
+    ]
+    assert request == snapshot
+
+
 def test_transform_to_invoke_model_format_raw_body_unchanged():
     """Non-messages bodies (e.g. Titan inputText) must not get Anthropic fields."""
     config = BedrockCountTokensConfig()

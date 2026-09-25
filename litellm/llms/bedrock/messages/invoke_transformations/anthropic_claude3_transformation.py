@@ -95,6 +95,9 @@ class AmazonAnthropicClaudeMessagesConfig(
     def beta_headers_provider(self) -> str:
         return self.custom_llm_provider or "bedrock"
 
+    def should_sanitize_unsupported_invoke_extensions(self) -> bool:
+        return True
+
     BEDROCK_INVOKE_ALLOWED_TOP_LEVEL_FIELDS = frozenset(BedrockInvokeAnthropicMessagesRequest.__annotations__.keys())
 
     def get_error_class(
@@ -737,12 +740,13 @@ class AmazonAnthropicClaudeMessagesConfig(
             else litellm_params.get("drop_params")
         )
         resolved_drop_params: Final = normalize_drop_params(configured_drop_params)
-        self._sanitize_request_for_bedrock_invoke(
-            anthropic_messages_request,
-            model=model,
-            drop_params=resolved_drop_params if resolved_drop_params is not None else litellm.drop_params is True,
-            modify_params=litellm.modify_params is True,
-        )
+        if self.should_sanitize_unsupported_invoke_extensions():
+            self._sanitize_request_for_bedrock_invoke(
+                anthropic_messages_request,
+                model=model,
+                drop_params=resolved_drop_params if resolved_drop_params is not None else litellm.drop_params is True,
+                modify_params=litellm.modify_params is True,
+            )
 
         # 5. Route structured-output params (`output_format` /
         # `output_config.format`) to native enforcement or the inline-schema
