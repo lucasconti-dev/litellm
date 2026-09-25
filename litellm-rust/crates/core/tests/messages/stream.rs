@@ -78,6 +78,16 @@ async fn stream_through(host: &RecordingStreamHost) -> Result<MessagesOutput, Er
     litellm_host::run::run(messages_machine(Arc::new(RecordingSecrets::empty())), host).await
 }
 
+fn delivered_bytes(chunks: &[Seen]) -> Vec<u8> {
+    chunks
+        .iter()
+        .flat_map(|step| match step {
+            Seen::Deliver(chunk) => chunk.to_vec(),
+            Seen::Open => panic!("the stream opens exactly once"),
+        })
+        .collect()
+}
+
 #[rstest]
 #[tokio::test]
 async fn the_stream_opens_once_before_relaying_the_upstream_body(call: MessagesCall) {
@@ -91,14 +101,7 @@ async fn the_stream_opens_once_before_relaying_the_upstream_body(call: MessagesC
     let [Seen::Open, chunks @ ..] = seen.as_slice() else {
         panic!("the stream opens before any chunk is delivered");
     };
-    let delivered: Vec<u8> = chunks
-        .iter()
-        .flat_map(|step| match step {
-            Seen::Deliver(chunk) => chunk.to_vec(),
-            Seen::Open => panic!("the stream opens exactly once"),
-        })
-        .collect();
-    assert_eq!(delivered, SSE_BODY.as_bytes());
+    assert_eq!(delivered_bytes(chunks), SSE_BODY.as_bytes());
 }
 
 #[rstest]
@@ -136,6 +139,27 @@ async fn an_upstream_error_fails_the_call_without_opening_the_stream(call: Messa
         "{error:?}"
     );
     assert!(host.seen.into_inner().unwrap().is_empty());
+}
+
+#[rstest]
+#[tokio::test]
+async fn a_truncated_upstream_body_fails_after_delivering_received_bytes(call: MessagesCall) {
+    let payload = b"event: message_start\ndata: {\"type\":\"message_start\"}\n\n";
+    let (base, server) = truncated_sse_upstream(payload).await;
+    let host = RecordingStreamHost::new(streaming(call, base), usize::MAX);
+
+    let error = stream_through(&host)
+        .await
+        .err()
+        .expect("a truncated body fails");
+
+    assert!(matches!(error, Error::Transport(_)), "{error:?}");
+    let seen = host.seen.into_inner().unwrap();
+    let [Seen::Open, chunks @ ..] = seen.as_slice() else {
+        panic!("the route opens before delivering bytes");
+    };
+    assert_eq!(delivered_bytes(chunks), payload.as_slice());
+    server.await.expect("server completes");
 }
 
 #[rstest]

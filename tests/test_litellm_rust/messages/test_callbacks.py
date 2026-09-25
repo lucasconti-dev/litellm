@@ -18,6 +18,7 @@ from tests.test_litellm_rust.support.requests import (
     MESSAGES_MODEL,
     MESSAGES_RESPONSE,
     request_body,
+    request_headers,
 )
 
 pytestmark = pytest.mark.requires_rust_extension
@@ -54,6 +55,31 @@ def assert_served_natively(server: RecordingServer) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("rollout", [Rollout.PYTHON_ONLY, Rollout.RUST_OPT_IN], ids=["python", "rust"])
+async def test_messages_custom_logger_pre_request_hook_rewrites_tools(
+    messages_server: RecordingServer, rollout: Rollout
+) -> None:
+    seen: Final = []
+
+    class RewriteTool(CustomLogger):
+        async def async_pre_request_hook(self, model, messages, kwargs):
+            seen.append((model, kwargs["tools"][0]["name"]))
+            return {**kwargs, "tools": [{**kwargs["tools"][0], "name": "renamed_tool"}]}
+
+    litellm.callbacks.append(RewriteTool())
+    with rebound(catalog, "RULES", (RouteRule(Route.MESSAGES, rollout), *catalog.RULES)):
+        await litellm.anthropic.messages.acreate(
+            **arguments(
+                messages_server,
+                tools=[{"name": "original_tool", "description": "Lookup", "input_schema": {"type": "object"}}],
+            )
+        )
+
+    assert seen == [(MESSAGES_MODEL, "original_tool")]
+    assert messages_server.requests[0].body["tools"][0]["name"] == "renamed_tool"
+
+
+@pytest.mark.asyncio
 async def test_native_messages_callbacks_see_the_provider_request_and_the_public_response(
     messages_server: RecordingServer,
 ) -> None:
@@ -78,14 +104,28 @@ async def test_native_messages_callbacks_see_the_provider_request_and_the_public
 
 
 @pytest.mark.asyncio
-async def test_native_messages_pre_call_body_edit_reaches_the_provider(messages_server: RecordingServer) -> None:
+@pytest.mark.parametrize("raise_after_edit", [False, True], ids=["callback-returns", "callback-raises"])
+async def test_native_messages_pre_call_logger_edits_reach_next_logger_and_provider(
+    messages_server: RecordingServer, raise_after_edit: bool
+) -> None:
+    observed: Final = []
+
     class Edit(CustomLogger):
         def log_pre_api_call(self, model, messages, kwargs):
             request_body(kwargs)["temperature"] = 0.25
+            request_headers(kwargs)["x-audit-tag"] = "reviewed"
+            if raise_after_edit:
+                raise RuntimeError("pre-call callback failed")
 
-    await litellm.anthropic.messages.acreate(**arguments(messages_server, callbacks=[Edit()]))
+    class Observe(CustomLogger):
+        def log_pre_api_call(self, model, messages, kwargs):
+            observed.append((request_body(kwargs)["temperature"], request_headers(kwargs)["x-audit-tag"]))
 
+    await litellm.anthropic.messages.acreate(**arguments(messages_server, callbacks=[Edit(), Observe()]))
+
+    assert observed == [(0.25, "reviewed")]
     assert messages_server.requests[0].body["temperature"] == 0.25
+    assert messages_server.requests[0].headers["x-audit-tag"] == "reviewed"
 
 
 @pytest.mark.asyncio
@@ -110,6 +150,27 @@ async def test_native_messages_provider_error_reaches_caller_and_failure_callbac
     assert_served_natively(messages_server)
     assert [phase for phase, _ in observed] == ["sync", "async"]
     assert all(error is raised.value for _, error in observed)
+
+
+@pytest.mark.asyncio
+async def test_native_messages_stream_provider_error_fails_before_returning_an_iterator(
+    messages_server: RecordingServer,
+) -> None:
+    messages_server.enqueue(
+        ResponseSpec(
+            body={"type": "error", "error": {"type": "invalid_request_error", "message": "bad stream"}}, status=400
+        )
+    )
+    recorder: Final = RecordingLogger()
+
+    with pytest.raises(litellm.BadRequestError) as raised:
+        await litellm.anthropic.messages.acreate(**arguments(messages_server, stream=True, callbacks=[recorder]))
+
+    assert_served_natively(messages_server)
+    assert messages_server.requests[0].body["stream"] is True
+    assert recorder.wait_for("log_failure_event")[0].kwargs["exception"] is raised.value
+    assert (await recorder.wait_for_async("async_log_failure_event"))[0].kwargs["exception"] is raised.value
+    assert "async_log_success_event" not in recorder.names
 
 
 def sse_payload() -> bytes:
@@ -140,6 +201,7 @@ async def test_native_messages_stream_relays_provider_events_and_logs_success_on
     assert len(success) == 1
     assert success[0].kwargs["stream"] is True
     assert success[0].kwargs["completion_start_time"] is not None
+    assert success[0].response.choices[0].message.content == "Hello from native Messages"
     assert "log_failure_event" not in recorder.names
 
 
@@ -147,20 +209,54 @@ async def test_native_messages_stream_relays_provider_events_and_logs_success_on
 async def test_native_messages_stream_closed_early_logs_success_once_for_what_was_delivered(
     messages_server: RecordingServer,
 ) -> None:
-    messages_server.enqueue(STREAM)
+    messages_server.enqueue(ResponseSpec(body=None, events=MESSAGES_EVENTS, inter_payload_delay=0.05))
     recorder: Final = RecordingLogger()
 
     stream: Final = await litellm.anthropic.messages.acreate(
         **arguments(messages_server, stream=True, callbacks=[recorder])
     )
     assert isinstance(stream, AsyncIterator)
-    await anext(stream)
+    first: Final = await anext(stream)
     await stream.aclose()
 
+    assert first == STREAM.payloads()[0]
     success: Final = await recorder.wait_for_async("async_log_success_event")
     assert len(success) == 1
+    assert success[0].response.choices[0].message.content == ""
     with pytest.raises(StopAsyncIteration):
         await anext(stream)
+
+
+@pytest.mark.asyncio
+async def test_native_messages_stream_disconnect_after_a_chunk_reports_failure_without_success(
+    messages_server: RecordingServer,
+) -> None:
+    messages_server.enqueue(
+        ResponseSpec(
+            body=None,
+            events=MESSAGES_EVENTS[:2],
+            disconnect_after_payloads=True,
+            inter_payload_delay=0.05,
+        )
+    )
+    recorder: Final = RecordingLogger()
+
+    stream: Final = await litellm.anthropic.messages.acreate(
+        **arguments(messages_server, stream=True, callbacks=[recorder])
+    )
+    first: Final = await anext(stream)
+    with pytest.raises(litellm.APIConnectionError) as raised:
+        async for _ in stream:
+            pass
+
+    assert first.startswith(b"event: message_start\n")
+    assert_served_natively(messages_server)
+    await drain_logging()
+    assert "async_log_success_event" not in recorder.names
+    assert len(recorder.wait_for("log_pre_api_call")) == 1
+    failure: Final = await recorder.wait_for_async("async_log_failure_event")
+    assert len(failure) == 1
+    assert failure[0].kwargs["exception"] is raised.value
 
 
 def test_native_sync_messages_stream_relays_provider_events_and_logs_success_once(
@@ -178,6 +274,27 @@ def test_native_sync_messages_stream_relays_provider_events_and_logs_success_onc
     assert len(recorder.wait_for("async_log_success_event")) == 1
 
 
+def test_native_sync_messages_stream_disconnect_reports_failure_without_success(
+    messages_server: RecordingServer,
+) -> None:
+    messages_server.enqueue(
+        ResponseSpec(body=None, events=MESSAGES_EVENTS[:2], disconnect_after_payloads=True, inter_payload_delay=0.05)
+    )
+    recorder: Final = RecordingLogger()
+
+    stream: Final = litellm.anthropic.messages.create(**arguments(messages_server, stream=True, callbacks=[recorder]))
+    first: Final = next(stream)
+    with pytest.raises(litellm.APIConnectionError) as raised:
+        tuple(stream)
+
+    assert first.startswith(b"event: message_start\n")
+    assert_served_natively(messages_server)
+    failure: Final = recorder.wait_for("log_failure_event")
+    assert len(failure) == 1
+    assert failure[0].kwargs["exception"] is raised.value
+    assert "async_log_success_event" not in recorder.names
+
+
 def test_native_sync_messages_returns_the_provider_message(messages_server: RecordingServer) -> None:
     recorder: Final = RecordingLogger()
 
@@ -186,3 +303,24 @@ def test_native_sync_messages_returns_the_provider_message(messages_server: Reco
     assert_served_natively(messages_server)
     assert response["content"] == MESSAGES_RESPONSE["content"]
     assert len(recorder.wait_for("log_success_event")) == 1
+
+
+def test_native_messages_dispatches_each_callback_phase_once_when_logger_is_registered_multiple_times(
+    messages_server: RecordingServer,
+) -> None:
+    recorder: Final = RecordingLogger()
+
+    litellm.anthropic.messages.create(
+        **arguments(
+            messages_server,
+            callbacks=[recorder, recorder],
+            success_callback=[recorder],
+            failure_callback=[recorder],
+        )
+    )
+    recorder.wait_for("log_success_event")
+
+    assert recorder.names.count("log_pre_api_call") == 1
+    assert recorder.names.count("logging_hook") == 1
+    assert recorder.names.count("log_success_event") == 1
+    assert "log_failure_event" not in recorder.names

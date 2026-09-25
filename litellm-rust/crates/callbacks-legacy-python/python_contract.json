@@ -81,6 +81,11 @@
     "name",
     "loaded"
   ],
+  "pre_request_hooks": [
+    "model",
+    "messages",
+    "kwargs"
+  ],
   "before_deployment_call": [
     "kwargs",
     "call_type"
