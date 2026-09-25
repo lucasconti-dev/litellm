@@ -82,6 +82,19 @@
     "tests/integration/authorization/test_warmed_policy.py::test_expiry_and_explicit_clear_reach_both_warmed_workers": [
       "mgmt.key.update.expiry_changes_reach_warmed_workers"
     ],
+    "tests/integration/database/test_bounded_in_lists.py::test_a_raw_in_filter_over_the_bind_parameter_cap_is_rejected_by_postgres": [
+      "other.database.bounded_in.raw_in_list_over_bind_cap_fails"
+    ],
+    "tests/integration/database/test_bounded_in_lists.py::test_find_many_in_and_count_in_read_every_row_past_the_bind_parameter_cap": [
+      "other.database.bounded_in.find_many_in_returns_every_row",
+      "other.database.bounded_in.count_in_counts_every_row"
+    ],
+    "tests/integration/database/test_bounded_in_lists.py::test_update_many_in_updates_every_row_inside_one_transaction": [
+      "other.database.bounded_in.update_many_in_updates_every_row_in_a_transaction"
+    ],
+    "tests/integration/database/test_bounded_in_lists.py::test_delete_many_in_deletes_every_listed_row_and_nothing_else": [
+      "other.database.bounded_in.delete_many_in_deletes_every_row"
+    ],
     "tests/integration/database/test_partition_transactions.py::test_real_partition_ddl_survives_witnessed_lock_and_is_idempotent": [
       "other.database.partitions.lock_wait_outlives_transaction_default",
       "other.database.partitions.repeat_preserves_rows"
